@@ -6,31 +6,52 @@
 # Copyright @ The University of British Columbia
 
 #------------------------------ Set the working directory ---------------------------------------
-working_directory <- "D:/2022-07-05-HDPairFinder"
+script_args <- commandArgs(trailingOnly = TRUE)
+default_working_directory <- "/home/haotian/IsotopePairFinder/mzML"
+working_directory <- if (length(script_args) >= 1) script_args[1] else default_working_directory
+working_directory <- normalizePath(working_directory, mustWork = TRUE)
 
 #------------------------------ Choose modules ----------------------------------------
 run_pairPicking <- TRUE # TRUE: run the first module, extracting the H-/D-labeled pairs; 
                         # FALSE: skip the first module
-run_alignment <- TRUE  # TRUE: run the second module, aligning the pairs across multiple samples
+run_alignment <- FALSE  # TRUE: run the second module, aligning the pairs across multiple samples
                         # FALSE: skip the second module
-run_gapFilling <- TRUE # TRUE: run the third module, retrieving the missing pair in each sample
+run_gapFilling <- FALSE # TRUE: run the third module, retrieving the missing pair in each sample
                         # FALSE: skip the third module
-run_annotation <- TRUE   # TRUE: run the fourth module, annotating the compound
+run_annotation <- FALSE   # TRUE: run the fourth module, annotating the compound
                         # FALSE: skip the fourth module
 
 #-----------------------------     Set the parameters     ----------------------------------------
+mzml_files_for_tol <- list.files(working_directory, pattern = "\\.mzML$", full.names = TRUE, ignore.case = TRUE)
+if (length(mzml_files_for_tol) != 1) {
+        stop("Expected exactly one mzML file in ", working_directory,
+             "; found ", length(mzml_files_for_tol), ".")
+}
+mass_accuracy_file <- sub("\\.mzML$", "_mass_accuracy.csv", mzml_files_for_tol, ignore.case = TRUE)
+if (!file.exists(mass_accuracy_file)) {
+        stop("Could not find the matching mass-accuracy CSV: ", mass_accuracy_file)
+}
+mass_accuracy <- read.csv(mass_accuracy_file, check.names = FALSE)
+if (nrow(mass_accuracy) < 1 || ncol(mass_accuracy) < 6) {
+        stop("The mass-accuracy CSV must contain cell F2: ", mass_accuracy_file)
+}
+sample_mz_tol <- suppressWarnings(as.numeric(mass_accuracy[1, 6])) # cell F2; m/z tolerance (ppm)
+if (length(sample_mz_tol) != 1 || !is.finite(sample_mz_tol) || sample_mz_tol <= 0) {
+        stop("Cell F2 must contain a positive numeric m/z tolerance (ppm): ", mass_accuracy_file)
+}
+
 ## 1) parameters for pair picking ##############
-heavy_mz_tol <- 20  # m/z tolerance (in ppm) of mass difference between the  
+heavy_mz_tol <- sample_mz_tol # m/z tolerance (in ppm) of mass difference between the
                   # theoretical heavy m/z and experiential heavy m/z
-rt_diff <- c(-0.2, 0.1)   # acceptable retention time difference (D-labeled - H-labeled): -0.2 ~ 0.1 min 
+rt_diff <- c(-0.2, 0.1)   # acceptable retention time difference (D-labeled - H-labeled): -0.2 ~ 0.1 min
 int_ratio <- c(0.4, 1.4)  # acceptable intensity ratio range (D-labeled / H-labeled): 0.4 ~ 1.4
 cc_threshold <- 0.7       # threshold for cross correlation
 run_inSourceFrag <- TRUE  # TRUE: use ISFrag to determine in-source fragments and remove them
                           # FALSE: do not identify in source fragments
                           # note: ISfrag takes more than half of the running time, if the users want to speed up the calculation, you can turn off ISFrag
 ## 2) parameters for alignment ##############
-align_mz_tol <- 50    # precursor m/z tolerance (ppm)
-align_rt_tol <- 0.5   # retention time tolerance (min)
+align_mz_tol <- sample_mz_tol # precursor m/z tolerance (ppm)
+align_rt_tol <- 0.2   # retention time tolerance (min)
 
 ## 3) parameters for gap filling ##############
 gap_mz_tol <- 20      # mz_tol for gap filling (ppm)
@@ -51,6 +72,12 @@ EIC_matrix <- function(rawlcms, mz, rt, mz_tol=0.01, rt_tol=30){
         eic_matrix <- cbind(rawlcms@scantime[rawEIC$scan],
                             rawEIC$intensity)
         return(eic_matrix)
+}
+
+contains_ms2_spectra <- function(mzml_file) {
+        mz_connection <- mzR::openMSfile(mzml_file)
+        on.exit(mzR::close(mz_connection), add = TRUE)
+        any(mzR::header(mz_connection)$msLevel == 2L)
 }
 
 ##2) Peak smoothing function ########
@@ -78,10 +105,18 @@ peak_smooth <- function(x,level=2){
 #----------------------------- Main program       ----------------------------------------
 #--------- 1st module: extraction of H-/D-labeled compounds ---------------
 #### 1.1 Pick the peaks ####
-run_peakPicking <- TRUE # TRUE: run the peak picking 
+run_peakPicking <- TRUE # TRUE: run the peak picking
                         # FALSE: use customized skip the peak picking
 setwd(working_directory)
 remove_isfrag_pairs <- TRUE # remove the in source fragment
+
+if (run_inSourceFrag && !contains_ms2_spectra(mzml_files_for_tol[1])) {
+        message(
+                "No MS2 spectra found in ", basename(mzml_files_for_tol[1]),
+                "; skipping ISFrag and continuing with the raw feature table."
+        )
+        run_inSourceFrag <- FALSE
+}
 
 if (run_peakPicking){
         library(xcms)
@@ -229,12 +264,10 @@ tagMz_cutoff <- 1.0 # m/z cutoff
 rt_cutoff <- 1 # retention time cutoff
 ratio_cutoff <- 1 # intensity ratio cutoff
 
-tags_mz <- c(2.0126, 4.0251, 6.0377, 8.0502) 
-# theoretical m/z difference of different number of tags
-# one tag: 2.0126
-# two tags: 4.0251
-# three tags: 6.0377
-# four tags: 8.0502
+mass_n14 <- 14.00307400443
+mass_n15 <- 15.00010889888
+n15_shift <- mass_n15 - mass_n14
+tags_mz <- (1:4) * n15_shift # theoretical m/z shifts for one to four 15N tags
 evaluation <- TRUE # whether evaluate the pairs
 message(Sys.time())
 if (run_pairPicking) {
@@ -1263,7 +1296,7 @@ if (run_gapFilling) {
              main = paste0("missing pairs:",nrow(corRecord), "_high_cor_num:",nrow(highCor)))
         write.csv(align, paste0("alignment_after_gap_filling.csv"), row.names = F)
 }
-sum(align$recovered)
+if (run_gapFilling) sum(align$recovered)
 
 #------ 4th module: Annotation -------------------------------------
 if(run_alignment){
