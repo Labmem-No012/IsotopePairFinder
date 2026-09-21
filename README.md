@@ -33,9 +33,11 @@ Detailed instructions on `HDPairFinder` can be found in [HDPairFinder user manua
 ## Parallel launcher
 
 `run_parallel.R` processes independent mzML/mass-accuracy CSV pairs in parallel
-without adding parallel code to the HDPairFinder workflow itself. The launcher
-only examines files directly inside the input directory (not its subfolders)
-and matches files by name:
+without adding parallel code to the HDPairFinder workflow itself. Each job runs
+through `run_hdpairfinder_serial.R`, which disables nested `BiocParallel`
+workers inside `xcmsSet()` because samples are already parallelized by the
+launcher. The launcher only examines files directly inside the input directory
+(not its subfolders) and matches files by name:
 
 ```text
 sample_A.mzML
@@ -75,11 +77,12 @@ alignment should be run once after all sample jobs have completed.
 
 ### Resource limits
 
-The launcher defaults to a maximum of four concurrent jobs as well as a 90%
-CPU-capacity ceiling. The four-job cap is based on an observed peak of about
-4.1 GiB per job and is intended to keep combined job RAM below 17 GiB. Every
-sample is limited to one BLAS/OpenMP thread, and Unix jobs run at niceness 10.
-A command-line worker count above either the four-job cap or CPU budget is
+The launcher defaults to a maximum of three concurrent jobs as well as a 90%
+CPU-capacity ceiling. Four concurrent jobs were observed to use about 18.7 GiB
+of system RAM, so the three-job cap provides margin below the 17 GiB target.
+Every sample is limited to one BLAS/OpenMP thread, and `xcmsSet()` uses a serial
+`BiocParallel` backend to prevent nested R forks. Unix jobs run at niceness 10.
+A command-line worker count above either the three-job cap or CPU budget is
 reduced automatically. RAM is monitored; because memory use varies with input,
 the job cap is a conservative scheduling limit rather than an OS-enforced RAM
 boundary.
@@ -88,12 +91,12 @@ The limits can be changed explicitly:
 
 ```sh
 HDPAIRFINDER_CPU_FRACTION=0.90 \
-HDPAIRFINDER_MAX_WORKERS=4 \
+HDPAIRFINDER_MAX_WORKERS=3 \
 HDPAIRFINDER_RESERVED_CORES=0 \
 HDPAIRFINDER_THREADS_PER_JOB=1 \
 HDPAIRFINDER_NICE=10 \
 HDPAIRFINDER_TELEMETRY_SECONDS=5 \
-Rscript run_parallel.R /path/to/input 4 /path/to/output
+Rscript run_parallel.R /path/to/input 3 /path/to/output
 ```
 
 ### Telemetry

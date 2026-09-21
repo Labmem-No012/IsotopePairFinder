@@ -10,12 +10,12 @@
 #
 # Defaults:
 #   input_directory  <repository>/mzML
-#   workers          up to 4 concurrent jobs and 90% of available CPU cores
+#   workers          up to 3 concurrent jobs and 90% of available CPU cores
 #   output_directory <input_directory>/.hdpairfinder_runs
 #
 # Resource limits can be adjusted with these environment variables:
 #   HDPAIRFINDER_CPU_FRACTION      CPU capacity ceiling, 0-1 (default: 0.90)
-#   HDPAIRFINDER_MAX_WORKERS       hard worker cap (default: 4)
+#   HDPAIRFINDER_MAX_WORKERS       hard worker cap (default: 3)
 #   HDPAIRFINDER_RESERVED_CORES    additional CPU cores kept free (default: 0)
 #   HDPAIRFINDER_THREADS_PER_JOB   BLAS/OpenMP threads per job (default: 1)
 #   HDPAIRFINDER_NICE              Unix process niceness, 0-19 (default: 10)
@@ -244,11 +244,11 @@ read_job_resources <- function(resource_file) {
         )
 }
 
-run_job <- function(job, main_script, threads_per_job, nice_value) {
+run_job <- function(job, worker_script, threads_per_job, nice_value) {
         started <- Sys.time()
         rscript <- file.path(R.home("bin"), "Rscript")
         command <- rscript
-        command_arguments <- c("--vanilla", shQuote(main_script), shQuote(job$working_directory))
+        command_arguments <- c("--vanilla", shQuote(worker_script), shQuote(job$working_directory))
 
         nice_command <- Sys.which("nice")
         if (.Platform$OS.type == "unix" && nice_value > 0 && nzchar(nice_command)) {
@@ -312,8 +312,8 @@ main <- function() {
         }
 
         launcher_dir <- launcher_directory()
-        main_script <- normalizePath(
-                file.path(launcher_dir, "HDPairFinder_v1.R"),
+        worker_script <- normalizePath(
+                file.path(launcher_dir, "run_hdpairfinder_serial.R"),
                 mustWork = TRUE
         )
         arguments <- commandArgs(trailingOnly = TRUE)
@@ -355,7 +355,7 @@ main <- function() {
         cpu_budget <- min(fraction_core_limit, reserved_core_limit)
         cpu_worker_limit <- max(1L, cpu_budget %/% threads_per_job)
         max_workers <- read_positive_integer(
-                Sys.getenv("HDPAIRFINDER_MAX_WORKERS", unset = "4"),
+                Sys.getenv("HDPAIRFINDER_MAX_WORKERS", unset = "3"),
                 "HDPAIRFINDER_MAX_WORKERS"
         )
         worker_limit <- max(1L, min(length(jobs), max_workers, cpu_worker_limit))
@@ -400,6 +400,7 @@ main <- function() {
                 cpu_fraction = cpu_fraction,
                 cpu_core_budget = cpu_budget,
                 threads_per_job = threads_per_job,
+                inner_biocparallel = "SerialParam",
                 requested_workers = requested_workers,
                 workers = workers,
                 hard_worker_cap = max_workers,
@@ -419,6 +420,7 @@ main <- function() {
                 if (.Platform$OS.type == "unix") paste0(", nice ", nice_value) else ""
         )
         message("Run directory: ", run_directory)
+        message("Inner xcms parallelism: BiocParallel SerialParam")
         message("Telemetry: ", file.path(run_directory, "telemetry.csv"))
 
         previous_plan <- future::plan()
@@ -427,7 +429,7 @@ main <- function() {
 
         futures <- lapply(jobs, function(job) {
                 future::future(
-                        run_job(job, main_script, threads_per_job, nice_value),
+                        run_job(job, worker_script, threads_per_job, nice_value),
                         seed = TRUE
                 )
         })
