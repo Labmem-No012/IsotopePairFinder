@@ -87,7 +87,10 @@ Every sample is limited to one BLAS/OpenMP thread, and `xcmsSet()` uses a serial
 A command-line worker count above either the three-job cap or CPU budget is
 reduced automatically. RAM is monitored; because memory use varies with input,
 the job cap is a conservative scheduling limit rather than an OS-enforced RAM
-boundary.
+boundary. If an R worker exits with status 139 (`SIGSEGV`), the launcher retries
+that sample once after the concurrent jobs finish. Retries run serially and keep
+their own log and resource files; the `attempt` column in `summary.csv` identifies
+which attempt supplied the final result.
 
 The limits can be changed explicitly:
 
@@ -98,6 +101,7 @@ HDPAIRFINDER_RESERVED_CORES=0 \
 HDPAIRFINDER_THREADS_PER_JOB=1 \
 HDPAIRFINDER_NICE=10 \
 HDPAIRFINDER_TELEMETRY_SECONDS=5 \
+HDPAIRFINDER_SEGFAULT_RETRIES=1 \
 Rscript run_parallel.R /path/to/input 3 /path/to/output
 ```
 

@@ -21,6 +21,7 @@
 #   HDPAIRFINDER_THREADS_PER_JOB   BLAS/OpenMP threads per job (default: 1)
 #   HDPAIRFINDER_NICE              Unix process niceness, 0-19 (default: 10)
 #   HDPAIRFINDER_TELEMETRY_SECONDS sampling interval (default: 5)
+#   HDPAIRFINDER_SEGFAULT_RETRIES  serial retries after exit 139 (default: 1)
 
 launcher_directory <- function() {
         file_argument <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
@@ -247,9 +248,24 @@ read_job_resources <- function(resource_file) {
         )
 }
 
-run_job <- function(job, worker_script, threads_per_job, nice_value) {
-        on.exit(unlink(job$input_links), add = TRUE)
+run_job <- function(job, worker_script, threads_per_job, nice_value, attempt = 1L) {
         started <- Sys.time()
+        log_file <- if (attempt == 1L) {
+                job$log_file
+        } else {
+                file.path(
+                        job$working_directory,
+                        paste0("HDPairFinder_attempt_", attempt, ".log")
+                )
+        }
+        resource_file <- if (attempt == 1L) {
+                job$resource_file
+        } else {
+                file.path(
+                        job$working_directory,
+                        paste0("resources_attempt_", attempt, ".txt")
+                )
+        }
         rscript <- file.path(R.home("bin"), "Rscript")
         command <- rscript
         command_arguments <- c("--vanilla", shQuote(worker_script), shQuote(job$working_directory))
@@ -279,21 +295,22 @@ run_job <- function(job, worker_script, threads_per_job, nice_value) {
                 timed_command <- command
                 command <- time_command
                 command_arguments <- c(
-                        "-v", "-o", shQuote(job$resource_file),
+                        "-v", "-o", shQuote(resource_file),
                         shQuote(timed_command), command_arguments
                 )
         }
         status <- suppressWarnings(system2(
                 command = command,
                 args = command_arguments,
-                stdout = job$log_file,
-                stderr = job$log_file,
+                stdout = log_file,
+                stderr = log_file,
                 env = thread_environment
         ))
-        resources <- read_job_resources(job$resource_file)
+        resources <- read_job_resources(resource_file)
 
         list(
                 sample_id = job$sample_id,
+                attempt = attempt,
                 success = identical(as.integer(status), 0L),
                 status = as.integer(status),
                 elapsed_seconds = as.numeric(difftime(Sys.time(), started, units = "secs")),
@@ -302,8 +319,8 @@ run_job <- function(job, worker_script, threads_per_job, nice_value) {
                 average_cpu_percent = unname(resources["average_cpu_percent"]),
                 max_rss_mb = unname(resources["max_rss_mb"]),
                 working_directory = job$working_directory,
-                log_file = job$log_file,
-                resource_file = job$resource_file
+                log_file = log_file,
+                resource_file = resource_file
         )
 }
 
@@ -353,6 +370,10 @@ main <- function() {
                 Sys.getenv("HDPAIRFINDER_TELEMETRY_SECONDS", unset = "5"),
                 "HDPAIRFINDER_TELEMETRY_SECONDS"
         )
+        segfault_retries <- read_nonnegative_integer(
+                Sys.getenv("HDPAIRFINDER_SEGFAULT_RETRIES", unset = "1"),
+                "HDPAIRFINDER_SEGFAULT_RETRIES"
+        )
 
         fraction_core_limit <- max(1L, floor(detected_cores * cpu_fraction))
         reserved_core_limit <- max(1L, detected_cores - reserved_cores)
@@ -389,6 +410,7 @@ main <- function() {
 
         database_file <- file.path(launcher_dir, "AMINES_library.csv")
         jobs <- lapply(jobs, prepare_job, run_directory = run_directory, database_file = database_file)
+        on.exit(unlink(unlist(lapply(jobs, `[[`, "input_links"))), add = TRUE)
         manifest <- data.frame(
                 sample_id = vapply(jobs, `[[`, character(1), "sample_id"),
                 mzml = vapply(jobs, `[[`, character(1), "mzml"),
@@ -411,6 +433,7 @@ main <- function() {
                 reserved_cores = reserved_cores,
                 nice = nice_value,
                 telemetry_interval_seconds = telemetry_seconds,
+                segfault_retries = segfault_retries,
                 memory_total_gb = unname(initial_memory["total_gb"]),
                 stringsAsFactors = FALSE
         )
@@ -455,12 +478,38 @@ main <- function() {
         }
         results <- lapply(futures, future::value)
 
+        if (segfault_retries > 0L) {
+                for (retry_number in seq_len(segfault_retries)) {
+                        retry_indexes <- which(vapply(
+                                results,
+                                function(result) identical(result$status, 139L),
+                                logical(1)
+                        ))
+                        if (length(retry_indexes) == 0L) break
+
+                        message(
+                                "Retrying ", length(retry_indexes),
+                                " job(s) that exited with SIGSEGV (status 139) serially; ",
+                                "retry ", retry_number, "/", segfault_retries, "."
+                        )
+                        for (job_index in retry_indexes) {
+                                results[[job_index]] <- run_job(
+                                        jobs[[job_index]],
+                                        worker_script,
+                                        threads_per_job,
+                                        nice_value,
+                                        attempt = retry_number + 1L
+                                )
+                        }
+                }
+        }
+
         summary <- do.call(rbind, lapply(results, as.data.frame, stringsAsFactors = FALSE))
         write.csv(summary, file.path(run_directory, "summary.csv"), row.names = FALSE)
         print(
                 summary[, c(
                         "sample_id", "success", "status", "elapsed_seconds",
-                        "average_cpu_percent", "max_rss_mb", "log_file"
+                        "attempt", "average_cpu_percent", "max_rss_mb", "log_file"
                 )],
                 row.names = FALSE
         )
