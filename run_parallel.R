@@ -2,8 +2,9 @@
 
 # Run independent mzML/mass-accuracy CSV pairs concurrently. The launcher only
 # examines files directly inside the input directory. Each pair is placed in an
-# isolated symlink-based working directory before HDPairFinder runs, preventing
-# its setwd() calls and fixed output names from colliding.
+# isolated working directory with temporary input symlinks before HDPairFinder
+# runs, preventing its setwd() calls and fixed output names from colliding. The
+# temporary links are removed after each job finishes.
 #
 # Usage:
 #   Rscript run_parallel.R [input_directory] [workers] [output_directory]
@@ -211,9 +212,11 @@ prepare_job <- function(job, run_directory, database_file = NULL) {
         link_targets <- file.path(job$working_directory, basename(link_sources))
         linked <- file.symlink(link_sources, link_targets)
         if (!all(linked)) {
+                unlink(link_targets[linked])
                 stop("Could not create input symlink(s) for job ", job$sample_id)
         }
 
+        job$input_links <- link_targets
         job$log_file <- file.path(job$working_directory, "HDPairFinder.log")
         job$resource_file <- file.path(job$working_directory, "resources.txt")
         job
@@ -245,6 +248,7 @@ read_job_resources <- function(resource_file) {
 }
 
 run_job <- function(job, worker_script, threads_per_job, nice_value) {
+        on.exit(unlink(job$input_links), add = TRUE)
         started <- Sys.time()
         rscript <- file.path(R.home("bin"), "Rscript")
         command <- rscript

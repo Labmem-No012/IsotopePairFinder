@@ -64,9 +64,11 @@ Rscript run_parallel.R /path/to/input 2 /path/to/output
 ```
 
 Each pair runs in an isolated directory under `.hdpairfinder_runs`, with its own
-`HDPairFinder.log`. Files without a matching mass-accuracy CSV are skipped. The
-sixth column of the CSV's first data row (spreadsheet cell F2) supplies that
-sample's pair-picking and alignment m/z tolerances in ppm.
+`HDPairFinder.log`. Input files are exposed to the job through temporary symbolic
+links that are removed when the job ends, so completed run directories do not
+accumulate stale or broken input links. Files without a matching mass-accuracy
+CSV are skipped. The sixth column of the CSV's first data row (spreadsheet cell
+F2) supplies that sample's pair-picking and alignment m/z tolerances in ppm.
 
 ISFrag runs only when the mzML file contains MS2 spectra. For MS1-only files,
 HDPairFinder records that ISFrag was skipped and continues pair picking from the
